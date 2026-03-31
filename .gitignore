@@ -1,0 +1,19 @@
+# Binary
+chimera-remote-port-forward
+
+# IDE
+.idea/
+.vscode/
+*.swp
+*.swo
+
+# OS
+.DS_Store
+Thumbs.db
+
+# Logs
+logs/
+*.log
+
+# Local config
+*.local.json
