@@ -37,6 +37,9 @@ go build -o chimera-remote-port-forward ./cmd
   -web-password admin123 \
   -log-dir /var/log/chimera \
   -log-max-age 7
+
+# 使用配置文件
+./chimera-remote-port-forward -mode server -config server.yaml
 ```
 
 ### 服务端参数
@@ -44,14 +47,31 @@ go build -o chimera-remote-port-forward ./cmd
 | 参数 | 默认值 | 说明 |
 |------|--------|------|
 | `-mode` | (必需) | 运行模式，必须为 `server` 或 `client` |
+| `-config` | (空) | 配置文件路径，支持 YAML 格式 |
 | `-listen` | `:52341` | WebSocket 监听地址 |
 | `-web` | `:52342` | Web 管理界面地址 |
 | `-port-start` | `10000` | 端口池起始端口 |
 | `-port-end` | `11000` | 端口池结束端口 |
 | `-token` | (空) | 客户端认证 Token，为空则不验证 |
 | `-web-password` | `admin` | Web 管理界面密码 |
-| `-log-dir` | `C:/logs/chimera-remote-port-forward` | 日志目录 |
+| `-log-dir` | (见说明) | 日志目录，默认跨平台适配 |
 | `-log-max-age` | `7` | 日志保留天数 |
+
+### 服务端配置文件示例 (server.yaml)
+
+```yaml
+listen: ":52341"
+web: ":52342"
+port_start: 10000
+port_end: 11000
+heartbeat_timeout: 90s
+auth_token: "your-secret-token"
+web_password: "admin123"
+log_dir: "/var/log/chimera-remote-port-forward"
+log_max_age: 7
+max_devices: 1000
+max_conns_per_proxy: 10000
+```
 
 ## 客户端启动
 
@@ -68,6 +88,9 @@ go build -o chimera-remote-port-forward ./cmd
   -device-name my-device \
   -local-port 8080 \
   -token YOUR_SECRET_TOKEN
+
+# 使用配置文件
+./chimera-remote-port-forward -mode client -config client.yaml
 ```
 
 ### 客户端参数
@@ -75,12 +98,30 @@ go build -o chimera-remote-port-forward ./cmd
 | 参数 | 默认值 | 说明 |
 |------|--------|------|
 | `-mode` | (必需) | 运行模式，必须为 `server` 或 `client` |
+| `-config` | (空) | 配置文件路径，支持 YAML 格式 |
 | `-server` | (必需) | 服务端 WebSocket 地址 |
 | `-device-name` | (必需) | 设备名称，需全局唯一 |
 | `-local-port` | (必需) | 要转发的本地端口 |
 | `-token` | (空) | 认证 Token，需与服务端一致 |
-| `-log-dir` | `C:/logs/chimera-remote-port-forward` | 日志目录 |
+| `-log-dir` | (见说明) | 日志目录，默认跨平台适配 |
 | `-log-max-age` | `7` | 日志保留天数 |
+
+### 客户端配置文件示例 (client.yaml)
+
+```yaml
+server: "ws://YOUR_SERVER:52341/ws"
+device_name: "my-device"
+local_port: 8080
+token: "your-secret-token"
+heartbeat_interval: 30s
+reconnect_interval: 3s
+log_dir: "/var/log/chimera-remote-port-forward"
+log_max_age: 7
+```
+
+### 配置优先级
+
+命令行参数优先级高于配置文件。如果同时指定配置文件和命令行参数，命令行参数会覆盖配置文件中的对应项。
 
 ## 使用示例
 
