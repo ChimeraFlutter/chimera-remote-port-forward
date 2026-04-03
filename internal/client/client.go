@@ -15,10 +15,10 @@ import (
 
 // Client 客户端
 type Client struct {
-	config     *config.ClientConfig
+	Config     *config.ClientConfig
 	conn       *websocket.Conn
 	localConns map[string]net.Conn // connID -> 本地TCP连接
-	remotePort int                 // 服务端分配的远程端口
+	RemotePort int                 // 服务端分配的远程端口（导出供外部访问）
 	mu         sync.RWMutex
 	connMu     sync.Mutex // 保护WebSocket写入
 	stopCh     chan struct{}
@@ -32,7 +32,7 @@ func NewClient(cfg *config.ClientConfig, logger *logger.Logger) *Client {
 		cfg = config.DefaultClientConfig()
 	}
 	return &Client{
-		config:     cfg,
+		Config:     cfg,
 		localConns: make(map[string]net.Conn),
 		stopCh:     make(chan struct{}),
 		doneCh:     make(chan struct{}),
@@ -51,8 +51,8 @@ func (c *Client) Start() error {
 			if err := c.connect(); err != nil {
 				c.logger.Warn("Connect failed, retrying",
 					logger.Err(err),
-					logger.Duration("retry_interval", c.config.ReconnectInterval))
-				time.Sleep(c.config.ReconnectInterval)
+					logger.Duration("retry_interval", c.Config.ReconnectInterval))
+				time.Sleep(c.Config.ReconnectInterval)
 				continue
 			}
 
@@ -60,9 +60,9 @@ func (c *Client) Start() error {
 			if err := c.register(); err != nil {
 				c.logger.Warn("Register failed, retrying",
 					logger.Err(err),
-					logger.Duration("retry_interval", c.config.ReconnectInterval))
+					logger.Duration("retry_interval", c.Config.ReconnectInterval))
 				c.closeConn()
-				time.Sleep(c.config.ReconnectInterval)
+				time.Sleep(c.Config.ReconnectInterval)
 				continue
 			}
 
@@ -91,7 +91,7 @@ func (c *Client) connect() error {
 		HandshakeTimeout: 10 * time.Second,
 	}
 
-	conn, _, err := dialer.Dial(c.config.Server, nil)
+	conn, _, err := dialer.Dial(c.Config.Server, nil)
 	if err != nil {
 		return fmt.Errorf("dial failed: %w", err)
 	}
@@ -101,7 +101,7 @@ func (c *Client) connect() error {
 	c.mu.Unlock()
 
 	c.logger.Info("Connected to server",
-		logger.String("server", c.config.Server))
+		logger.String("server", c.Config.Server))
 	return nil
 }
 
@@ -109,9 +109,9 @@ func (c *Client) connect() error {
 func (c *Client) register() error {
 	msg := &protocol.ClientMessage{
 		Type:       protocol.TypeRegister,
-		DeviceName: c.config.DeviceName,
-		LocalPort:  c.config.LocalPort,
-		Token:      c.config.Token,
+		DeviceName: c.Config.DeviceName,
+		LocalPort:  c.Config.LocalPort,
+		Token:      c.Config.Token,
 	}
 
 	if err := c.sendMessage(msg); err != nil {
@@ -137,11 +137,11 @@ func (c *Client) register() error {
 		return fmt.Errorf("unexpected response type: %s", resp.Type)
 	}
 
-	c.remotePort = resp.RemotePort
+	c.RemotePort = resp.RemotePort
 	c.logger.Info("Device registered",
-		logger.String("device", c.config.DeviceName),
-		logger.Int("local_port", c.config.LocalPort),
-		logger.Int("remote_port", c.remotePort))
+		logger.String("device", c.Config.DeviceName),
+		logger.Int("local_port", c.Config.LocalPort),
+		logger.Int("remote_port", c.RemotePort))
 
 	return nil
 }
@@ -182,7 +182,7 @@ func (c *Client) run() {
 
 // heartbeatLoop 心跳循环
 func (c *Client) heartbeatLoop(done <-chan struct{}) {
-	ticker := time.NewTicker(c.config.HeartbeatInterval)
+	ticker := time.NewTicker(c.Config.HeartbeatInterval)
 	defer ticker.Stop()
 
 	for {
@@ -225,11 +225,11 @@ func (c *Client) handleMessage(msg *protocol.ServerMessage) {
 
 // handleConnOpen 处理新连接建立
 func (c *Client) handleConnOpen(connID string) {
-	conn, err := net.Dial("tcp", fmt.Sprintf("127.0.0.1:%d", c.config.LocalPort))
+	conn, err := net.Dial("tcp", fmt.Sprintf("127.0.0.1:%d", c.Config.LocalPort))
 	if err != nil {
 		c.logger.Error("Connect to local port failed",
 			logger.Err(err),
-			logger.Int("local_port", c.config.LocalPort))
+			logger.Int("local_port", c.Config.LocalPort))
 		return
 	}
 

@@ -3,6 +3,7 @@ package server
 import (
 	"context"
 	"encoding/json"
+	"fmt"
 	"net/http"
 	"sync"
 	"time"
@@ -21,6 +22,8 @@ type Device struct {
 	Conn          *websocket.Conn // WebSocket连接
 	LastHeartbeat time.Time       // 最后心跳时间
 	connMu        sync.Mutex      // 保护WebSocket写入
+	Enabled       bool            // 是否已启用
+	ExpireAt      time.Time       // 过期时间（零值表示永久）
 }
 
 // Server 服务端
@@ -65,6 +68,9 @@ func NewServer(cfg *config.ServerConfig, log *logger.Logger) *Server {
 func (s *Server) Start() error {
 	// 启动心跳检测
 	go s.checkHeartbeatTimeout()
+
+	// 启动过期设备检查
+	go s.checkExpiredDevices()
 
 	// 启动Web管理界面
 	webServer := NewWebServer(s, s.logger)
@@ -207,6 +213,7 @@ func (s *Server) handleRegister(conn *websocket.Conn, msg *protocol.ClientMessag
 		LocalPort:     msg.LocalPort,
 		Conn:          conn,
 		LastHeartbeat: time.Now(),
+		Enabled:       false, // 默认未启用，需在 Web 界面手动开启
 	}
 
 	port, err := s.portPool.Allocate(device)
@@ -220,17 +227,9 @@ func (s *Server) handleRegister(conn *websocket.Conn, msg *protocol.ClientMessag
 	s.devices[msg.DeviceName] = device
 	s.conns[conn] = device
 
-	// 启动TCP代理
-	proxy := NewProxy(port, device, s.config.MaxConnsPerProxy, s.logger)
-	if err := proxy.Start(); err != nil {
-		s.portPool.Release(port)
-		delete(s.devices, msg.DeviceName)
-		delete(s.conns, conn)
-		s.mu.Unlock()
-		s.sendError(conn, "failed to start proxy: "+err.Error())
-		return
-	}
-	s.proxies[port] = proxy
+	// 不再自动启动代理，需在 Web 界面手动启用
+	// proxy := NewProxy(port, device, s.config.MaxConnsPerProxy, s.logger)
+	// ...
 
 	s.mu.Unlock()
 
@@ -373,4 +372,112 @@ func (s *Server) GetDevices() []*Device {
 		devices = append(devices, d)
 	}
 	return devices
+}
+
+// GetDevice 获取指定设备信息
+func (s *Server) GetDevice(name string) *Device {
+	s.mu.RLock()
+	defer s.mu.RUnlock()
+	return s.devices[name]
+}
+
+// EnableDevice 启用设备端口
+func (s *Server) EnableDevice(deviceName string, duration time.Duration) error {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+
+	device, exists := s.devices[deviceName]
+	if !exists {
+		return fmt.Errorf("device not found: %s", deviceName)
+	}
+
+	if device.Enabled {
+		return fmt.Errorf("device already enabled: %s", deviceName)
+	}
+
+	// 启动TCP代理
+	proxy := NewProxy(device.RemotePort, device, s.config.MaxConnsPerProxy, s.logger)
+	if err := proxy.Start(); err != nil {
+		return fmt.Errorf("failed to start proxy: %w", err)
+	}
+	s.proxies[device.RemotePort] = proxy
+
+	// 更新设备状态
+	device.Enabled = true
+	if duration > 0 {
+		device.ExpireAt = time.Now().Add(duration)
+	} else {
+		device.ExpireAt = time.Time{} // 永久
+	}
+
+	s.logger.Info("Device enabled",
+		logger.String("device", deviceName),
+		logger.Int("remote_port", device.RemotePort),
+		logger.Duration("duration", duration))
+
+	return nil
+}
+
+// DisableDevice 禁用设备端口
+func (s *Server) DisableDevice(deviceName string) error {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+
+	device, exists := s.devices[deviceName]
+	if !exists {
+		return fmt.Errorf("device not found: %s", deviceName)
+	}
+
+	if !device.Enabled {
+		return fmt.Errorf("device not enabled: %s", deviceName)
+	}
+
+	// 停止代理
+	if proxy, ok := s.proxies[device.RemotePort]; ok {
+		proxy.Stop()
+		delete(s.proxies, device.RemotePort)
+	}
+
+	// 更新设备状态
+	device.Enabled = false
+	device.ExpireAt = time.Time{}
+
+	s.logger.Info("Device disabled",
+		logger.String("device", deviceName),
+		logger.Int("remote_port", device.RemotePort))
+
+	return nil
+}
+
+// checkExpiredDevices 检查过期设备
+func (s *Server) checkExpiredDevices() {
+	ticker := time.NewTicker(1 * time.Minute)
+	defer ticker.Stop()
+
+	for {
+		select {
+		case <-ticker.C:
+			s.mu.Lock()
+			now := time.Now()
+			for _, device := range s.devices {
+				if device.Enabled && !device.ExpireAt.IsZero() && now.After(device.ExpireAt) {
+					s.logger.Info("Device expired, disabling",
+						logger.String("device", device.Name),
+						logger.Int("remote_port", device.RemotePort))
+
+					// 停止代理
+					if proxy, ok := s.proxies[device.RemotePort]; ok {
+						proxy.Stop()
+						delete(s.proxies, device.RemotePort)
+					}
+
+					device.Enabled = false
+					device.ExpireAt = time.Time{}
+				}
+			}
+			s.mu.Unlock()
+		case <-s.stopCh:
+			return
+		}
+	}
 }

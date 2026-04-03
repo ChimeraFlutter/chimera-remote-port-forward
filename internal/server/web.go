@@ -35,6 +35,8 @@ func (w *WebServer) Start(addr string) error {
 	http.HandleFunc("/", w.handleIndex)
 	http.HandleFunc("/api/login", w.handleLogin)
 	http.HandleFunc("/api/devices", w.handleDevices)
+	http.HandleFunc("/api/device/enable", w.handleDeviceEnable)
+	http.HandleFunc("/api/device/disable", w.handleDeviceDisable)
 
 	w.logger.Info("Web interface started",
 		logger.String("addr", addr))
@@ -98,30 +100,117 @@ func (w *WebServer) handleDevices(rw http.ResponseWriter, r *http.Request) {
 
 	// 构建响应数据
 	type DeviceInfo struct {
-		Name          string `json:"name"`
-		LocalPort     int    `json:"local_port"`
-		RemotePort    int    `json:"remote_port"`
-		Status        string `json:"status"`
-		LastHeartbeat string `json:"last_heartbeat"`
-		Connections   int    `json:"connections"`
+		Name             string `json:"name"`
+		LocalPort        int    `json:"local_port"`
+		RemotePort       int    `json:"remote_port"`
+		Status           string `json:"status"`
+		LastHeartbeat    string `json:"last_heartbeat"`
+		Connections      int    `json:"connections"`
+		Enabled          bool   `json:"enabled"`
+		ExpireAt         string `json:"expire_at"`
+		RemainingSeconds int64  `json:"remaining_seconds"`
 	}
 
 	deviceInfos := make([]DeviceInfo, 0, len(devices))
+	now := time.Now()
 	for _, d := range devices {
-		deviceInfos = append(deviceInfos, DeviceInfo{
+		info := DeviceInfo{
 			Name:          d.Name,
 			LocalPort:     d.LocalPort,
 			RemotePort:    d.RemotePort,
 			Status:        "online",
 			LastHeartbeat: d.LastHeartbeat.Format("2006-01-02 15:04:05"),
 			Connections:   0, // TODO: 从proxy获取连接数
-		})
+			Enabled:       d.Enabled,
+		}
+
+		if !d.ExpireAt.IsZero() {
+			info.ExpireAt = d.ExpireAt.Format("2006-01-02 15:04:05")
+			remaining := d.ExpireAt.Sub(now)
+			if remaining > 0 {
+				info.RemainingSeconds = int64(remaining.Seconds())
+			}
+		}
+
+		deviceInfos = append(deviceInfos, info)
 	}
 
 	rw.Header().Set("Content-Type", "application/json")
 	json.NewEncoder(rw).Encode(map[string]interface{}{
 		"devices": deviceInfos,
 	})
+}
+
+// handleDeviceEnable 处理启用设备
+func (w *WebServer) handleDeviceEnable(rw http.ResponseWriter, r *http.Request) {
+	if r.Method != http.MethodPost {
+		http.Error(rw, "Method not allowed", http.StatusMethodNotAllowed)
+		return
+	}
+
+	// 验证session
+	if !w.authenticate(r) {
+		http.Error(rw, "Unauthorized", http.StatusUnauthorized)
+		return
+	}
+
+	var req struct {
+		DeviceName    string `json:"device_name"`
+		DurationHours int    `json:"duration_hours"` // 0 表示永久
+	}
+
+	if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
+		http.Error(rw, "Invalid request", http.StatusBadRequest)
+		return
+	}
+
+	var duration time.Duration
+	if req.DurationHours > 0 {
+		duration = time.Duration(req.DurationHours) * time.Hour
+	}
+
+	if err := w.server.EnableDevice(req.DeviceName, duration); err != nil {
+		rw.Header().Set("Content-Type", "application/json")
+		rw.WriteHeader(http.StatusBadRequest)
+		json.NewEncoder(rw).Encode(map[string]string{"error": err.Error()})
+		return
+	}
+
+	rw.Header().Set("Content-Type", "application/json")
+	json.NewEncoder(rw).Encode(map[string]string{"status": "ok"})
+}
+
+// handleDeviceDisable 处理禁用设备
+func (w *WebServer) handleDeviceDisable(rw http.ResponseWriter, r *http.Request) {
+	if r.Method != http.MethodPost {
+		http.Error(rw, "Method not allowed", http.StatusMethodNotAllowed)
+		return
+	}
+
+	// 验证session
+	if !w.authenticate(r) {
+		http.Error(rw, "Unauthorized", http.StatusUnauthorized)
+		return
+	}
+
+	var req struct {
+		DeviceName string `json:"device_name"`
+	}
+
+	if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
+		http.Error(rw, "Invalid request", http.StatusBadRequest)
+		return
+	}
+
+	if err := w.server.DisableDevice(req.DeviceName); err != nil {
+		rw.Header().Set("Content-Type", "application/json")
+		rw.WriteHeader(http.StatusBadRequest)
+		json.NewEncoder(rw).Encode(map[string]string{"error": err.Error()})
+		return
+	}
+
+	rw.Header().Set("Content-Type", "application/json")
+	json.NewEncoder(rw).Encode(map[string]string{"status": "ok"})
 }
 
 // authenticate 验证session
@@ -342,10 +431,101 @@ const devicesHTML = `<!DOCTYPE html>
             color: #e74c3c;
             font-weight: 600;
         }
+        .status-disabled {
+            color: #95a5a6;
+            font-weight: 600;
+        }
         .empty {
             text-align: center;
             padding: 40px;
             color: #999;
+        }
+        .btn-enable {
+            padding: 6px 12px;
+            background: #27ae60;
+            color: white;
+            border: none;
+            border-radius: 4px;
+            cursor: pointer;
+            font-size: 13px;
+        }
+        .btn-enable:hover {
+            background: #219a52;
+        }
+        .btn-disable {
+            padding: 6px 12px;
+            background: #e74c3c;
+            color: white;
+            border: none;
+            border-radius: 4px;
+            cursor: pointer;
+            font-size: 13px;
+        }
+        .btn-disable:hover {
+            background: #c0392b;
+        }
+        .remaining-time {
+            font-family: monospace;
+            color: #666;
+        }
+        .remaining-time.warning {
+            color: #e74c3c;
+        }
+        /* Modal */
+        .modal {
+            display: none;
+            position: fixed;
+            top: 0;
+            left: 0;
+            width: 100%;
+            height: 100%;
+            background: rgba(0,0,0,0.5);
+            align-items: center;
+            justify-content: center;
+        }
+        .modal.show {
+            display: flex;
+        }
+        .modal-content {
+            background: white;
+            padding: 30px;
+            border-radius: 10px;
+            width: 100%;
+            max-width: 400px;
+        }
+        .modal-title {
+            font-size: 18px;
+            font-weight: 600;
+            margin-bottom: 20px;
+        }
+        .duration-options {
+            display: flex;
+            flex-direction: column;
+            gap: 10px;
+        }
+        .duration-btn {
+            padding: 12px;
+            background: #f8f9fa;
+            border: 1px solid #ddd;
+            border-radius: 5px;
+            cursor: pointer;
+            text-align: left;
+            font-size: 14px;
+        }
+        .duration-btn:hover {
+            background: #667eea;
+            color: white;
+            border-color: #667eea;
+        }
+        .modal-cancel {
+            margin-top: 15px;
+            padding: 10px;
+            background: #e74c3c;
+            color: white;
+            border: none;
+            border-radius: 5px;
+            cursor: pointer;
+            width: 100%;
         }
     </style>
 </head>
@@ -362,23 +542,66 @@ const devicesHTML = `<!DOCTYPE html>
                     <th>Local Port</th>
                     <th>Remote Port</th>
                     <th>Status</th>
+                    <th>Remaining Time</th>
                     <th>Last Heartbeat</th>
-                    <th>Connections</th>
+                    <th>Action</th>
                 </tr>
             </thead>
             <tbody id="deviceList"></tbody>
         </table>
         <div id="empty" class="empty" style="display: none;">No devices connected</div>
     </div>
+
+    <!-- Enable Modal -->
+    <div id="enableModal" class="modal">
+        <div class="modal-content">
+            <div class="modal-title">Enable Device: <span id="modalDeviceName"></span></div>
+            <div class="duration-options">
+                <button class="duration-btn" onclick="confirmEnable(1)">1 Hour</button>
+                <button class="duration-btn" onclick="confirmEnable(6)">6 Hours</button>
+                <button class="duration-btn" onclick="confirmEnable(12)">12 Hours</button>
+                <button class="duration-btn" onclick="confirmEnable(24)">24 Hours (Default)</button>
+                <button class="duration-btn" onclick="confirmEnable(0)">Permanent (No Expiry)</button>
+            </div>
+            <button class="modal-cancel" onclick="closeModal()">Cancel</button>
+        </div>
+    </div>
+
     <script>
         var token = localStorage.getItem('token');
         if (!token) {
             window.location.href = '/';
         }
 
+        var pendingDevice = null;
+        var countdownTimers = {};
+
         function logout() {
             localStorage.removeItem('token');
             window.location.href = '/';
+        }
+
+        function formatRemaining(seconds) {
+            if (seconds <= 0) return 'Expired';
+            var h = Math.floor(seconds / 3600);
+            var m = Math.floor((seconds % 3600) / 60);
+            var s = seconds % 60;
+            return h + 'h ' + m + 'm ' + s + 's';
+        }
+
+        function updateCountdowns() {
+            var elements = document.querySelectorAll('[data-remaining]');
+            elements.forEach(function(el) {
+                var remaining = parseInt(el.getAttribute('data-remaining'));
+                if (remaining > 0) {
+                    remaining--;
+                    el.setAttribute('data-remaining', remaining);
+                    el.textContent = formatRemaining(remaining);
+                    if (remaining < 3600) {
+                        el.classList.add('warning');
+                    }
+                }
+            });
         }
 
         function loadDevices() {
@@ -399,13 +622,33 @@ const devicesHTML = `<!DOCTYPE html>
                 empty.style.display = 'none';
                 var html = '';
                 data.devices.forEach(function(d) {
+                    var statusClass = d.enabled ? 'status-online' : 'status-disabled';
+                    var statusText = d.enabled ? 'Enabled' : 'Disabled';
+
+                    var remainingHtml = '-';
+                    if (d.enabled) {
+                        if (d.remaining_seconds > 0) {
+                            remainingHtml = '<span class="remaining-time" data-remaining="' + d.remaining_seconds + '">' + formatRemaining(d.remaining_seconds) + '</span>';
+                        } else if (d.expire_at === '') {
+                            remainingHtml = '<span class="remaining-time">Permanent</span>';
+                        }
+                    }
+
+                    var actionHtml = '';
+                    if (d.enabled) {
+                        actionHtml = '<button class="btn-disable" onclick="disableDevice(\'' + d.name + '\')">Disable</button>';
+                    } else {
+                        actionHtml = '<button class="btn-enable" onclick="showEnableModal(\'' + d.name + '\')">Enable</button>';
+                    }
+
                     html += '<tr>' +
                         '<td>' + d.name + '</td>' +
                         '<td>' + d.local_port + '</td>' +
                         '<td>' + d.remote_port + '</td>' +
-                        '<td class="status-' + d.status + '">' + d.status + '</td>' +
+                        '<td class="' + statusClass + '">' + statusText + '</td>' +
+                        '<td>' + remainingHtml + '</td>' +
                         '<td>' + d.last_heartbeat + '</td>' +
-                        '<td>' + d.connections + '</td>' +
+                        '<td>' + actionHtml + '</td>' +
                         '</tr>';
                 });
                 tbody.innerHTML = html;
@@ -415,8 +658,72 @@ const devicesHTML = `<!DOCTYPE html>
             });
         }
 
+        function showEnableModal(deviceName) {
+            pendingDevice = deviceName;
+            document.getElementById('modalDeviceName').textContent = deviceName;
+            document.getElementById('enableModal').classList.add('show');
+        }
+
+        function closeModal() {
+            document.getElementById('enableModal').classList.remove('show');
+            pendingDevice = null;
+        }
+
+        function confirmEnable(hours) {
+            if (!pendingDevice) return;
+
+            fetch('/api/device/enable', {
+                method: 'POST',
+                headers: {
+                    'Content-Type': 'application/json',
+                    'Authorization': 'Bearer ' + token
+                },
+                body: JSON.stringify({
+                    device_name: pendingDevice,
+                    duration_hours: hours
+                })
+            })
+            .then(function(res) { return res.json(); })
+            .then(function(data) {
+                if (data.error) {
+                    alert('Error: ' + data.error);
+                } else {
+                    closeModal();
+                    loadDevices();
+                }
+            })
+            .catch(function(err) {
+                alert('Failed to enable device');
+            });
+        }
+
+        function disableDevice(deviceName) {
+            if (!confirm('Disable device ' + deviceName + '?')) return;
+
+            fetch('/api/device/disable', {
+                method: 'POST',
+                headers: {
+                    'Content-Type': 'application/json',
+                    'Authorization': 'Bearer ' + token
+                },
+                body: JSON.stringify({ device_name: deviceName })
+            })
+            .then(function(res) { return res.json(); })
+            .then(function(data) {
+                if (data.error) {
+                    alert('Error: ' + data.error);
+                } else {
+                    loadDevices();
+                }
+            })
+            .catch(function(err) {
+                alert('Failed to disable device');
+            });
+        }
+
         loadDevices();
         setInterval(loadDevices, 5000);
+        setInterval(updateCountdowns, 1000);
     </script>
 </body>
 </html>`
