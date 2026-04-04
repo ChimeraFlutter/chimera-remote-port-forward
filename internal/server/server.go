@@ -301,6 +301,10 @@ func (s *Server) handleHeartbeat(conn *websocket.Conn) {
 func (s *Server) handleData(conn *websocket.Conn, msg *protocol.ClientMessage) {
 	s.mu.RLock()
 	device, exists := s.conns[conn]
+	var proxy *Proxy
+	if exists {
+		proxy = s.proxies[device.RemotePort]
+	}
 	s.mu.RUnlock()
 
 	if !exists {
@@ -312,7 +316,7 @@ func (s *Server) handleData(conn *websocket.Conn, msg *protocol.ClientMessage) {
 	}
 
 	// 转发数据到代理
-	if proxy, ok := s.proxies[device.RemotePort]; ok {
+	if proxy != nil {
 		s.logger.Info("Server forwarding data from client to proxy",
 			logger.String("device", device.Name),
 			logger.String("conn_id", msg.ConnID),
@@ -331,6 +335,10 @@ func (s *Server) handleData(conn *websocket.Conn, msg *protocol.ClientMessage) {
 func (s *Server) handleConnCloseFromClient(conn *websocket.Conn, msg *protocol.ClientMessage) {
 	s.mu.RLock()
 	device, exists := s.conns[conn]
+	var proxy *Proxy
+	if exists {
+		proxy = s.proxies[device.RemotePort]
+	}
 	s.mu.RUnlock()
 
 	if !exists {
@@ -340,7 +348,7 @@ func (s *Server) handleConnCloseFromClient(conn *websocket.Conn, msg *protocol.C
 	}
 
 	// 关闭代理中的对应连接
-	if proxy, ok := s.proxies[device.RemotePort]; ok {
+	if proxy != nil {
 		s.logger.Info("Closing proxy connection from client request",
 			logger.String("device", device.Name),
 			logger.String("conn_id", msg.ConnID))
