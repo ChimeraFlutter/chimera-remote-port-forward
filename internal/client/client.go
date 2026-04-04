@@ -82,8 +82,26 @@ func (c *Client) Start() error {
 
 // Stop 停止客户端
 func (c *Client) Stop() {
-	close(c.stopCh)
-	c.closeConn()
+	// 先关闭 stopCh，让其他 goroutine 知道要停止
+	select {
+	case <-c.stopCh:
+		// 已经关闭，直接返回
+		return
+	default:
+		close(c.stopCh)
+	}
+
+	// 获取连接引用并置空（不持有锁关闭，避免与 cleanup 死锁）
+	c.mu.Lock()
+	conn := c.conn
+	c.conn = nil
+	c.mu.Unlock()
+
+	if conn != nil {
+		conn.Close()
+	}
+
+	// 等待 Start() 返回
 	<-c.doneCh
 	c.logger.Info("Client stopped")
 }
