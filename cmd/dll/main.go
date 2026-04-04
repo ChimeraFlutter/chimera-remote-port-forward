@@ -94,7 +94,7 @@ func stateCallback(deviceName string, state int, remotePort int, message string)
 }
 
 //export AddPort
-func AddPort(deviceName *C.char, localPort C.int) C.int {
+func AddPort(deviceName *C.char, localIP *C.char, localPort C.int) C.int {
 	mcMu.RLock()
 	defer mcMu.RUnlock()
 
@@ -103,7 +103,8 @@ func AddPort(deviceName *C.char, localPort C.int) C.int {
 	}
 
 	goDeviceName := C.GoString(deviceName)
-	err := multiClient.AddPort(goDeviceName, int(localPort))
+	goLocalIP := C.GoString(localIP)
+	err := multiClient.AddPort(goDeviceName, goLocalIP, int(localPort))
 	if err != nil {
 		if log != nil {
 			log.Error("AddPort failed", logger.String("error", err.Error()))
@@ -145,7 +146,7 @@ func GetPortCount() C.int {
 }
 
 //export GetPortInfo
-func GetPortInfo(index C.int, deviceNameBuf *C.char, bufSize C.int, localPort *C.int, remotePort *C.int) C.int {
+func GetPortInfo(index C.int, deviceNameBuf *C.char, bufSize C.int, localIPBuf *C.char, localIPBufSize C.int, localPort *C.int, remotePort *C.int) C.int {
 	mcMu.RLock()
 	defer mcMu.RUnlock()
 
@@ -169,6 +170,15 @@ func GetPortInfo(index C.int, deviceNameBuf *C.char, bufSize C.int, localPort *C
 	}
 	C.memcpy(unsafe.Pointer(deviceNameBuf), unsafe.Pointer(&goName[0]), C.size_t(copyLen))
 	*(*byte)(unsafe.Pointer(uintptr(unsafe.Pointer(deviceNameBuf)) + uintptr(copyLen))) = 0
+
+	// 复制 localIP 到缓冲区
+	goLocalIP := []byte(info.LocalIP)
+	copyLen = len(goLocalIP)
+	if copyLen >= int(localIPBufSize) {
+		copyLen = int(localIPBufSize) - 1
+	}
+	C.memcpy(unsafe.Pointer(localIPBuf), unsafe.Pointer(&goLocalIP[0]), C.size_t(copyLen))
+	*(*byte)(unsafe.Pointer(uintptr(unsafe.Pointer(localIPBuf)) + uintptr(copyLen))) = 0
 
 	*localPort = C.int(info.LocalPort)
 	*remotePort = C.int(info.RemotePort)

@@ -58,7 +58,7 @@ func (m *MultiClient) SetLogger(log *logger.Logger) {
 }
 
 // AddPort 添加端口映射
-func (m *MultiClient) AddPort(deviceName string, localPort int) error {
+func (m *MultiClient) AddPort(deviceName string, localIP string, localPort int) error {
 	m.mu.Lock()
 	defer m.mu.Unlock()
 
@@ -66,9 +66,14 @@ func (m *MultiClient) AddPort(deviceName string, localPort int) error {
 		return fmt.Errorf("device name already exists: %s", deviceName)
 	}
 
+	if localIP == "" {
+		localIP = "127.0.0.1"
+	}
+
 	cfg := &config.ClientConfig{
 		Server:            m.server,
 		DeviceName:        deviceName,
+		LocalIP:           localIP,
 		LocalPort:         localPort,
 		Token:             m.token,
 		HeartbeatInterval: config.DefaultClientConfig().HeartbeatInterval,
@@ -123,6 +128,7 @@ func (m *MultiClient) GetPorts() []PortInfo {
 	for name, client := range m.clients {
 		info := PortInfo{
 			DeviceName: name,
+			LocalIP:    client.Config.LocalIP,
 			LocalPort:  client.Config.LocalPort,
 			RemotePort: client.RemotePort,
 		}
@@ -134,6 +140,7 @@ func (m *MultiClient) GetPorts() []PortInfo {
 // PortInfo 端口信息
 type PortInfo struct {
 	DeviceName string
+	LocalIP    string
 	LocalPort  int
 	RemotePort int
 }

@@ -17,3 +17,7 @@ logs/
 
 # Local config
 *.local.json
+
+# Server config (contains sensitive credentials)
+config-server.yaml
+config-client.yaml

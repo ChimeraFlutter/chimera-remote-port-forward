@@ -32,6 +32,7 @@ func main() {
 	// 客户端参数
 	serverAddr := flag.String("server", "", "服务端地址 (例如 ws://localhost:52341/ws)")
 	deviceName := flag.String("device-name", "", "设备名称")
+	localIP := flag.String("local-ip", "", "本地IP (默认 127.0.0.1)")
 	localPort := flag.Int("local-port", 0, "本地端口")
 
 	flag.Parse()
@@ -46,7 +47,7 @@ func main() {
 	case "server":
 		startServer(*configFile, *listen, *web, *portStart, *portEnd, *token, *webPassword, *logDir, *logMaxAge)
 	case "client":
-		startClient(*configFile, *serverAddr, *deviceName, *localPort, *token, *logDir, *logMaxAge)
+		startClient(*configFile, *serverAddr, *deviceName, *localIP, *localPort, *token, *logDir, *logMaxAge)
 	default:
 		log.Fatalf("[ERROR] 无效的mode: %s, 必须是 server 或 client", *mode)
 	}
@@ -127,7 +128,7 @@ func startServer(configFile, listen, web string, portStart, portEnd int, token, 
 	// 初始化日志
 	logLogger, err := logger.NewLogger(&logger.Config{
 		BaseDir:     cfg.LogDir,
-		ServiceName: "chimera-monitor-backend",
+		ServiceName: "server",
 		MaxAge:      time.Duration(cfg.LogMaxAge) * 24 * time.Hour,
 		Writer:      os.Stdout,
 	})
@@ -145,7 +146,21 @@ func startServer(configFile, listen, web string, portStart, portEnd int, token, 
 		<-sigCh
 		logLogger.Info("Shutting down")
 		s.Stop()
-		logLogger.Close()
+		logLogger.Info("Server stopped, closing logger")
+
+		// 使用 goroutine 关闭 logger，带超时
+		done := make(chan struct{})
+		go func() {
+			logLogger.Close()
+			close(done)
+		}()
+
+		select {
+		case <-done:
+		case <-time.After(3 * time.Second):
+			logLogger.Info("Logger close timeout, exiting anyway")
+		}
+
 		os.Exit(0)
 	}()
 
@@ -157,7 +172,7 @@ func startServer(configFile, listen, web string, portStart, portEnd int, token, 
 	}
 }
 
-func startClient(configFile, serverAddr, deviceName string, localPort int, token, logDir string, logMaxAge int) {
+func startClient(configFile, serverAddr, deviceName, localIP string, localPort int, token, logDir string, logMaxAge int) {
 	// 加载默认配置
 	cfg := config.DefaultClientConfig()
 
@@ -173,6 +188,9 @@ func startClient(configFile, serverAddr, deviceName string, localPort int, token
 		}
 		if fileCfg.DeviceName != "" {
 			cfg.DeviceName = fileCfg.DeviceName
+		}
+		if fileCfg.LocalIP != "" {
+			cfg.LocalIP = fileCfg.LocalIP
 		}
 		if fileCfg.LocalPort > 0 {
 			cfg.LocalPort = fileCfg.LocalPort
@@ -201,6 +219,9 @@ func startClient(configFile, serverAddr, deviceName string, localPort int, token
 	if deviceName != "" {
 		cfg.DeviceName = deviceName
 	}
+	if localIP != "" {
+		cfg.LocalIP = localIP
+	}
 	if localPort > 0 {
 		cfg.LocalPort = localPort
 	}
@@ -228,7 +249,7 @@ func startClient(configFile, serverAddr, deviceName string, localPort int, token
 	// 初始化日志
 	logLogger, err := logger.NewLogger(&logger.Config{
 		BaseDir:     cfg.LogDir,
-		ServiceName: "chimera-monitor-backend",
+		ServiceName: "client",
 		MaxAge:      time.Duration(cfg.LogMaxAge) * 24 * time.Hour,
 		Writer:      os.Stdout,
 	})

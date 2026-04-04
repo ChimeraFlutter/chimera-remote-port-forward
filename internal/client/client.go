@@ -110,6 +110,7 @@ func (c *Client) register() error {
 	msg := &protocol.ClientMessage{
 		Type:       protocol.TypeRegister,
 		DeviceName: c.Config.DeviceName,
+		LocalIP:    c.Config.LocalIP,
 		LocalPort:  c.Config.LocalPort,
 		Token:      c.Config.Token,
 	}
@@ -140,6 +141,7 @@ func (c *Client) register() error {
 	c.RemotePort = resp.RemotePort
 	c.logger.Info("Device registered",
 		logger.String("device", c.Config.DeviceName),
+		logger.String("local_ip", c.Config.LocalIP),
 		logger.Int("local_port", c.Config.LocalPort),
 		logger.Int("remote_port", c.RemotePort))
 
@@ -213,23 +215,37 @@ func (c *Client) handleMessage(msg *protocol.ServerMessage) {
 	case protocol.TypeHeartbeatAck:
 		// 心跳响应，忽略
 	case protocol.TypeConnOpen:
+		c.logger.Info("Received conn_open from server",
+			logger.String("conn_id", msg.ConnID))
 		c.handleConnOpen(msg.ConnID)
 	case protocol.TypeData:
+		c.logger.Info("Received data from server",
+			logger.String("conn_id", msg.ConnID),
+			logger.Int("bytes", len(msg.Data)))
 		c.handleData(msg.ConnID, msg.Data)
 	case protocol.TypeConnClose:
+		c.logger.Info("Received conn_close from server",
+			logger.String("conn_id", msg.ConnID))
 		c.handleConnClose(msg.ConnID)
 	case protocol.TypeError:
 		c.logger.Error("Server error", logger.String("message", msg.Message))
+	default:
+		c.logger.Warn("Unknown message type from server",
+			logger.String("type", msg.Type))
 	}
 }
 
 // handleConnOpen 处理新连接建立
 func (c *Client) handleConnOpen(connID string) {
-	conn, err := net.Dial("tcp", fmt.Sprintf("127.0.0.1:%d", c.Config.LocalPort))
+	localAddr := fmt.Sprintf("%s:%d", c.Config.LocalIP, c.Config.LocalPort)
+	conn, err := net.Dial("tcp", localAddr)
 	if err != nil {
 		c.logger.Error("Connect to local port failed",
 			logger.Err(err),
-			logger.Int("local_port", c.Config.LocalPort))
+			logger.String("local_addr", localAddr),
+			logger.String("conn_id", connID))
+		// 通知服务端连接失败
+		c.sendConnClose(connID)
 		return
 	}
 
@@ -239,14 +255,14 @@ func (c *Client) handleConnOpen(connID string) {
 
 	go c.readFromLocal(connID, conn)
 
-	c.logger.Debug("Local connection established",
+	c.logger.Info("Local connection established",
 		logger.String("conn_id", connID))
 }
 
 // handleConnClose 处理连接关闭
 func (c *Client) handleConnClose(connID string) {
 	c.closeLocalConn(connID)
-	c.logger.Debug("Local connection closed",
+	c.logger.Info("Local connection closed",
 		logger.String("conn_id", connID))
 }
 
@@ -259,28 +275,46 @@ func (c *Client) handleData(connID string, data []byte) {
 	if !exists {
 		c.logger.Warn("Received data for unknown connection",
 			logger.String("conn_id", connID))
+		// 通知服务端连接不存在
+		c.sendConnClose(connID)
 		return
 	}
 
 	// 写入数据到本地连接
-	if _, err := localConn.Write(data); err != nil {
+	n, err := localConn.Write(data)
+	if err != nil {
 		c.logger.Error("Write to local failed",
 			logger.Err(err),
 			logger.String("conn_id", connID))
 		c.closeLocalConn(connID)
+	} else {
+		c.logger.Info("Wrote data to local",
+			logger.String("conn_id", connID),
+			logger.Int("bytes", n))
 	}
 }
 
 // readFromLocal 从本地连接读取数据并发送到服务端
 func (c *Client) readFromLocal(connID string, conn net.Conn) {
 	buf := make([]byte, 32*1024)
-	defer c.closeLocalConn(connID)
+	defer func() {
+		c.closeLocalConn(connID)
+		// 通知服务端连接关闭
+		c.sendConnClose(connID)
+	}()
 
 	for {
 		n, err := conn.Read(buf)
 		if err != nil {
+			c.logger.Info("Local connection read ended",
+				logger.String("conn_id", connID),
+				logger.Err(err))
 			return
 		}
+
+		c.logger.Info("Read from local, sending to server",
+			logger.String("conn_id", connID),
+			logger.Int("bytes", n))
 
 		if err := c.sendMessage(&protocol.ClientMessage{
 			Type:   protocol.TypeData,
@@ -333,21 +367,49 @@ func (c *Client) closeConn() {
 
 // sendMessage 发送消息
 func (c *Client) sendMessage(msg *protocol.ClientMessage) error {
+	c.connMu.Lock()
 	c.mu.RLock()
 	if c.conn == nil {
 		c.mu.RUnlock()
+		c.connMu.Unlock()
 		return fmt.Errorf("connection not established")
 	}
 
 	data, err := json.Marshal(msg)
 	if err != nil {
 		c.mu.RUnlock()
+		c.connMu.Unlock()
+		c.logger.Error("sendMessage: marshal failed", logger.Err(err))
 		return err
 	}
-
-	c.connMu.Lock()
+	conn := c.conn
 	c.mu.RUnlock()
-	err = c.conn.WriteMessage(websocket.TextMessage, data)
+
+	err = conn.WriteMessage(websocket.TextMessage, data)
 	c.connMu.Unlock()
+	if err != nil {
+		c.logger.Error("sendMessage: write failed",
+			logger.Err(err),
+			logger.String("type", msg.Type),
+			logger.String("conn_id", msg.ConnID))
+	} else {
+		c.logger.Debug("sendMessage: success",
+			logger.String("type", msg.Type),
+			logger.String("conn_id", msg.ConnID),
+			logger.Int("bytes", len(data)))
+	}
 	return err
+}
+
+// sendConnClose 发送连接关闭消息给服务端
+func (c *Client) sendConnClose(connID string) {
+	err := c.sendMessage(&protocol.ClientMessage{
+		Type:   protocol.TypeConnClose,
+		ConnID: connID,
+	})
+	if err != nil {
+		c.logger.Warn("Failed to send conn_close to server",
+			logger.Err(err),
+			logger.String("conn_id", connID))
+	}
 }

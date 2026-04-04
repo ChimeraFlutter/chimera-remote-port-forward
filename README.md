@@ -27,19 +27,70 @@
 
 ## 编译
 
+### 使用编译脚本 (推荐)
+
+项目提供了 Python 编译脚本，支持交互式和命令行两种模式：
+
+```bash
+# 交互式模式
+python build.py
+
+# 命令行模式
+python build.py -t windows        # 编译 Windows DLL
+python build.py -t linux          # 编译 Linux .so
+python build.py -t macos          # 编译 macOS .dylib
+python build.py -t ios            # 编译 iOS 静态库
+python build.py -t all            # 编译全部平台
+```
+
+详细使用说明请参考 [编译文档](./docs/BUILD.md)。
+
+### 手动编译
+
 ```bash
 # 编译可执行文件
 go build -o chimera-remote-port-forward ./cmd
 
-# 编译 Windows DLL (需要交叉编译)
-GOOS=windows GOARCH=amd64 go build -buildmode=c-shared -o chimera.dll ./cmd/dll
-GOOS=windows GOARCH=arm64 go build -buildmode=c-shared -o chimera_arm64.dll ./cmd/dll
+# ========== 动态库 (DLL/SO/DYLIB) ==========
 
-# 编译 Linux so
-GOOS=linux GOARCH=amd64 go build -buildmode=c-shared -o libchimera.so ./cmd/dll
+# Windows DLL (AMD64)
+GOOS=windows GOARCH=amd64 CGO_ENABLED=1 go build -buildmode=c-shared -o chimera-port.dll ./cmd/dll
 
-# 编译 macOS dylib
-go build -buildmode=c-shared -o libchimera.dylib ./cmd/dll
+# Windows DLL (ARM64)
+GOOS=windows GOARCH=arm64 go build -buildmode=c-shared -o chimera-port_arm64.dll ./cmd/dll
+
+# Linux SO (AMD64)
+GOOS=linux GOARCH=amd64 go build -buildmode=c-shared -o libchimera-port.so ./cmd/dll
+
+# Linux SO (ARM64)
+GOOS=linux GOARCH=arm64 go build -buildmode=c-shared -o libchimera-port_arm64.so ./cmd/dll
+
+# macOS DYLIB (AMD64)
+GOOS=darwin GOARCH=amd64 go build -buildmode=c-shared -o libchimera-port.dylib ./cmd/dll
+
+# macOS DYLIB (ARM64/Apple Silicon)
+GOOS=darwin GOARCH=arm64 go build -buildmode=c-shared -o libchimera-port_arm64.dylib ./cmd/dll
+
+# ========== iOS 静态库 ==========
+
+# iOS 设备 (ARM64)
+GOOS=ios GOARCH=arm64 go build -buildmode=c-archive -o libchimera-port_ios.a ./cmd/dll
+
+# iOS 模拟器 (ARM64 - M1/M2 Mac)
+GOOS=ios GOARCH=arm64 GOAMD64=v1 go build -buildmode=c-archive -o libchimera-port_sim_arm64.a ./cmd/dll
+
+# iOS 模拟器 (AMD64 - Intel Mac)
+GOOS=ios GOARCH=amd64 go build -buildmode=c-archive -o libchimera-port_sim_amd64.a ./cmd/dll
+```
+
+### iOS XCFramework 制作
+
+```bash
+# 创建 XCFramework（合并设备+模拟器）
+xcodebuild -create-xcframework \
+  -library libchimera-port_ios.a -headers . \
+  -library libchimera-port_sim_arm64.a -headers . \
+  -output ChimeraPort.xcframework
 ```
 
 ## 服务端启动

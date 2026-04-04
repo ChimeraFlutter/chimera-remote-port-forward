@@ -4,6 +4,7 @@ package protocol
 type ClientMessage struct {
 	Type       string `json:"type"`        // register, heartbeat, data
 	DeviceName string `json:"device_name"` // 设备名称
+	LocalIP    string `json:"local_ip"`    // 本地IP
 	LocalPort  int    `json:"local_port"`  // 本地端口
 	Token      string `json:"token"`       // 认证Token (仅register时使用)
 	ConnID     string `json:"conn_id"`     // 连接标识 (data时使用)
@@ -22,14 +23,15 @@ type ServerMessage struct {
 // 消息类型常量
 const (
 	// 客户端消息类型
-	TypeRegister  = "register"
-	TypeHeartbeat = "heartbeat"
-	TypeData      = "data"
+	TypeRegister   = "register"
+	TypeHeartbeat  = "heartbeat"
+	TypeData       = "data"
+	TypeConnClose  = "conn_close" // 客户端通知服务端关闭连接
 
 	// 服务端消息类型
 	TypeAssigned     = "assigned"
 	TypeHeartbeatAck = "heartbeat_ack"
 	TypeConnOpen     = "conn_open"
-	TypeConnClose    = "conn_close"
+	TypeConnCloseSrv = "conn_close" // 服务端通知客户端关闭连接
 	TypeError        = "error"
 )

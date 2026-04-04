@@ -90,14 +90,14 @@ func (l *Logger) rotateIfNeeded() error {
 		l.currentFile.Close()
 	}
 
-	// 创建目录
-	dirPath := filepath.Join(l.baseDir, l.serviceName, date)
+	// 创建目录 (按日期，server/client 日志放同一目录)
+	dirPath := filepath.Join(l.baseDir, date)
 	if err := os.MkdirAll(dirPath, 0755); err != nil {
 		return fmt.Errorf("failed to create log directory: %w", err)
 	}
 
-	// 创建新文件
-	fileName := fmt.Sprintf("raw-%s-%02d.log", date, hour)
+	// 创建新文件 (文件名包含服务名区分 server/client)
+	fileName := fmt.Sprintf("raw-%s-%02d-%s.log", date, hour, l.serviceName)
 	filePath := filepath.Join(dirPath, fileName)
 
 	f, err := os.OpenFile(filePath, os.O_CREATE|os.O_APPEND|os.O_WRONLY, 0644)
@@ -240,15 +240,13 @@ func (l *Logger) cleanupLoop() {
 
 // cleanOldLogs 清理过期日志
 func (l *Logger) cleanOldLogs() {
-	serviceDir := filepath.Join(l.baseDir, l.serviceName)
-
 	// 检查目录是否存在
-	if _, err := os.Stat(serviceDir); os.IsNotExist(err) {
+	if _, err := os.Stat(l.baseDir); os.IsNotExist(err) {
 		return
 	}
 
 	// 读取所有日期目录
-	entries, err := os.ReadDir(serviceDir)
+	entries, err := os.ReadDir(l.baseDir)
 	if err != nil {
 		return
 	}
@@ -268,7 +266,7 @@ func (l *Logger) cleanOldLogs() {
 
 		// 删除过期目录
 		if dirTime.Before(cutoff) {
-			dirPath := filepath.Join(serviceDir, entry.Name())
+			dirPath := filepath.Join(l.baseDir, entry.Name())
 			os.RemoveAll(dirPath)
 		}
 	}

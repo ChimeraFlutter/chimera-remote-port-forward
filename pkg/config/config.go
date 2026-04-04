@@ -74,6 +74,7 @@ func DefaultServerConfig() *ServerConfig {
 type ClientConfig struct {
 	Server            string        `yaml:"server" json:"server"`                         // 服务端地址
 	DeviceName        string        `yaml:"device_name" json:"device_name"`               // 设备名称
+	LocalIP           string        `yaml:"local_ip" json:"local_ip"`                     // 本地IP (默认 127.0.0.1)
 	LocalPort         int           `yaml:"local_port" json:"local_port"`                 // 本地端口
 	Token             string        `yaml:"token" json:"token"`                           // 认证Token
 	HeartbeatInterval time.Duration `yaml:"heartbeat_interval" json:"heartbeat_interval"` // 心跳间隔
@@ -85,6 +86,7 @@ type ClientConfig struct {
 // DefaultClientConfig 返回默认客户端配置
 func DefaultClientConfig() *ClientConfig {
 	return &ClientConfig{
+		LocalIP:           "127.0.0.1",
 		HeartbeatInterval: 30 * time.Second,
 		ReconnectInterval: 3 * time.Second,
 		LogDir:            defaultLogDir(),

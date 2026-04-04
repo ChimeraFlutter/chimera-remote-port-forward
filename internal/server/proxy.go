@@ -67,15 +67,26 @@ func NewProxy(port int, device *Device, maxConns int, logger *logger.Logger) *Pr
 
 // Start 启动代理
 func (p *Proxy) Start() error {
-	listener, err := net.Listen("tcp", ":"+strconv.Itoa(p.port))
+	addr := ":" + strconv.Itoa(p.port)
+	p.logger.Info("Attempting to bind TCP port",
+		logger.String("addr", addr),
+		logger.Int("port", p.port),
+		logger.String("device", p.device.Name))
+
+	listener, err := net.Listen("tcp", addr)
 	if err != nil {
+		p.logger.Error("Failed to bind TCP port",
+			logger.Err(err),
+			logger.Int("port", p.port),
+			logger.String("device", p.device.Name))
 		return err
 	}
 	p.listener = listener
 
-	p.logger.Info("Proxy started",
+	p.logger.Info("TCP port bound successfully",
 		logger.Int("port", p.port),
-		logger.String("device", p.device.Name))
+		logger.String("device", p.device.Name),
+		logger.String("listen_addr", listener.Addr().String()))
 
 	go p.acceptLoop()
 
@@ -92,12 +103,18 @@ func (p *Proxy) Stop() {
 		p.listener.Close()
 	}
 
+	// 收集连接，在锁外关闭以避免死锁
 	p.mu.Lock()
+	connsToClose := make([]net.Conn, 0, len(p.conns))
 	for _, conn := range p.conns {
-		conn.Close()
+		connsToClose = append(connsToClose, conn)
 	}
 	p.conns = make(map[string]net.Conn)
 	p.mu.Unlock()
+
+	for _, conn := range connsToClose {
+		conn.Close()
+	}
 }
 
 // acceptLoop 接受连接循环
@@ -181,6 +198,10 @@ func (p *Proxy) readLoop(connID string, conn net.Conn) {
 				return
 			}
 
+			p.logger.Info("Proxy read from external, forwarding to client",
+				logger.String("conn_id", connID),
+				logger.Int("bytes", n))
+
 			// 转发数据到客户端
 			p.sendToClient(&protocol.ServerMessage{
 				Type:   protocol.TypeData,
@@ -202,7 +223,19 @@ func (p *Proxy) HandleFromClient(connID string, data []byte) {
 		if p.stopped.Load() {
 			return
 		}
-		conn.Write(data)
+		n, err := conn.Write(data)
+		if err != nil {
+			p.logger.Error("Proxy write to external failed",
+				logger.Err(err),
+				logger.String("conn_id", connID))
+		} else {
+			p.logger.Info("Proxy wrote to external",
+				logger.String("conn_id", connID),
+				logger.Int("bytes", n))
+		}
+	} else {
+		p.logger.Warn("HandleFromClient: unknown conn_id",
+			logger.String("conn_id", connID))
 	}
 }
 
@@ -219,16 +252,32 @@ func (p *Proxy) CloseConn(connID string) {
 // sendToClient 发送消息到客户端
 func (p *Proxy) sendToClient(msg *protocol.ServerMessage) {
 	if p.device.Conn == nil {
+		p.logger.Error("sendToClient: device WebSocket connection is nil",
+			logger.String("conn_id", msg.ConnID),
+			logger.String("device", p.device.Name))
 		return
 	}
 
 	data, err := json.Marshal(msg)
 	if err != nil {
+		p.logger.Error("sendToClient: marshal failed",
+			logger.Err(err),
+			logger.String("conn_id", msg.ConnID))
 		return
 	}
 	p.device.connMu.Lock()
 	defer p.device.connMu.Unlock()
-	_ = p.device.Conn.WriteMessage(websocket.TextMessage, data)
+	if err := p.device.Conn.WriteMessage(websocket.TextMessage, data); err != nil {
+		p.logger.Error("sendToClient: write failed",
+			logger.Err(err),
+			logger.String("conn_id", msg.ConnID),
+			logger.String("device", p.device.Name))
+	} else {
+		p.logger.Info("sendToClient: message sent",
+			logger.String("type", string(msg.Type)),
+			logger.String("conn_id", msg.ConnID),
+			logger.Int("bytes", len(data)))
+	}
 }
 
 // generateConnID 生成连接ID

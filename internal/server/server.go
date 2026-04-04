@@ -17,6 +17,7 @@ import (
 // Device 设备信息
 type Device struct {
 	Name          string          // 设备名称
+	LocalIP       string          // 本地IP
 	LocalPort     int             // 本地端口
 	RemotePort    int             // 远程端口
 	Conn          *websocket.Conn // WebSocket连接
@@ -106,13 +107,19 @@ func (s *Server) Stop() {
 		proxy.Stop()
 		delete(s.proxies, port)
 	}
-	// 关闭所有设备连接
+	// 收集要关闭的连接，在锁外关闭以避免死锁
+	var connsToClose []*websocket.Conn
 	for _, device := range s.devices {
-		device.Conn.Close()
+		connsToClose = append(connsToClose, device.Conn)
 	}
 	s.devices = make(map[string]*Device)
 	s.conns = make(map[*websocket.Conn]*Device)
 	s.mu.Unlock()
+
+	// 在锁外关闭连接
+	for _, conn := range connsToClose {
+		conn.Close()
+	}
 
 	// 关闭HTTP服务器
 	if s.httpSrv != nil {
@@ -159,11 +166,23 @@ func (s *Server) handleWebSocket(w http.ResponseWriter, r *http.Request) {
 
 		switch msg.Type {
 		case protocol.TypeRegister:
+			s.logger.Info("Received register message",
+				logger.String("device", msg.DeviceName))
 			s.handleRegister(conn, &msg)
 		case protocol.TypeHeartbeat:
 			s.handleHeartbeat(conn)
 		case protocol.TypeData:
+			s.logger.Info("Received data message from client",
+				logger.String("conn_id", msg.ConnID),
+				logger.Int("bytes", len(msg.Data)))
 			s.handleData(conn, &msg)
+		case protocol.TypeConnClose:
+			s.logger.Info("Received conn_close message from client",
+				logger.String("conn_id", msg.ConnID))
+			s.handleConnCloseFromClient(conn, &msg)
+		default:
+			s.logger.Warn("Unknown message type received",
+				logger.String("type", msg.Type))
 		}
 	}
 }
@@ -210,6 +229,7 @@ func (s *Server) handleRegister(conn *websocket.Conn, msg *protocol.ClientMessag
 	// 分配端口
 	device := &Device{
 		Name:          msg.DeviceName,
+		LocalIP:       msg.LocalIP,
 		LocalPort:     msg.LocalPort,
 		Conn:          conn,
 		LastHeartbeat: time.Now(),
@@ -247,14 +267,18 @@ func (s *Server) handleRegister(conn *websocket.Conn, msg *protocol.ClientMessag
 
 // handleHeartbeat 处理心跳消息
 func (s *Server) handleHeartbeat(conn *websocket.Conn) {
-	s.mu.Lock()
-	defer s.mu.Unlock()
+	s.mu.RLock()
+	device, exists := s.conns[conn]
+	s.mu.RUnlock()
 
-	if device, exists := s.conns[conn]; exists {
+	if exists {
+		device.connMu.Lock()
 		device.LastHeartbeat = time.Now()
-		s.sendMessage(conn, &protocol.ServerMessage{
-			Type: protocol.TypeHeartbeatAck,
-		})
+		data, err := json.Marshal(&protocol.ServerMessage{Type: protocol.TypeHeartbeatAck})
+		if err == nil {
+			conn.WriteMessage(websocket.TextMessage, data)
+		}
+		device.connMu.Unlock()
 	}
 }
 
@@ -265,12 +289,47 @@ func (s *Server) handleData(conn *websocket.Conn, msg *protocol.ClientMessage) {
 	s.mu.RUnlock()
 
 	if !exists {
+		s.logger.Warn("handleData: device not found for WebSocket connection",
+			logger.String("conn_addr", conn.RemoteAddr().String()),
+			logger.String("conn_id", msg.ConnID),
+			logger.Int("data_bytes", len(msg.Data)))
 		return
 	}
 
 	// 转发数据到代理
 	if proxy, ok := s.proxies[device.RemotePort]; ok {
+		s.logger.Info("Server forwarding data from client to proxy",
+			logger.String("device", device.Name),
+			logger.String("conn_id", msg.ConnID),
+			logger.Int("bytes", len(msg.Data)))
 		proxy.HandleFromClient(msg.ConnID, msg.Data)
+	} else {
+		s.logger.Warn("handleData: no proxy found for device",
+			logger.String("device", device.Name),
+			logger.Int("remote_port", device.RemotePort),
+			logger.Bool("enabled", device.Enabled),
+			logger.String("conn_id", msg.ConnID))
+	}
+}
+
+// handleConnCloseFromClient 处理客户端发来的连接关闭消息
+func (s *Server) handleConnCloseFromClient(conn *websocket.Conn, msg *protocol.ClientMessage) {
+	s.mu.RLock()
+	device, exists := s.conns[conn]
+	s.mu.RUnlock()
+
+	if !exists {
+		s.logger.Warn("handleConnCloseFromClient: device not found",
+			logger.String("conn_id", msg.ConnID))
+		return
+	}
+
+	// 关闭代理中的对应连接
+	if proxy, ok := s.proxies[device.RemotePort]; ok {
+		s.logger.Info("Closing proxy connection from client request",
+			logger.String("device", device.Name),
+			logger.String("conn_id", msg.ConnID))
+		proxy.CloseConn(msg.ConnID)
 	}
 }
 
@@ -309,6 +368,7 @@ func (s *Server) checkHeartbeatTimeout() {
 	for {
 		select {
 		case <-ticker.C:
+			var connsToClose []*websocket.Conn
 			s.mu.Lock()
 			now := time.Now()
 			for _, device := range s.devices {
@@ -316,10 +376,14 @@ func (s *Server) checkHeartbeatTimeout() {
 					s.logger.Warn("Device timeout",
 						logger.String("device", device.Name),
 						logger.Duration("timeout", s.config.HeartbeatTimeout))
-					device.Conn.Close()
+					connsToClose = append(connsToClose, device.Conn)
 				}
 			}
 			s.mu.Unlock()
+			// 在锁外关闭连接，避免死锁
+			for _, conn := range connsToClose {
+				conn.Close()
+			}
 		case <-s.stopCh:
 			return
 		}
