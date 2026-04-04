@@ -87,11 +87,27 @@ func (m *MultiClient) AddPort(deviceName string, localIP string, localPort int) 
 	go func() {
 		m.notifyState(deviceName, StateConnecting, 0, "")
 
-		// 包装原始 Start，监听状态
+		if m.logger != nil {
+			m.logger.Info("MultiClient: starting client",
+				logger.String("device", deviceName))
+		}
+
 		err := client.Start()
 
+		// Start() 返回后通知断开状态
 		if err != nil {
+			if m.logger != nil {
+				m.logger.Warn("MultiClient: client exited with error",
+					logger.String("device", deviceName),
+					logger.Err(err))
+			}
 			m.notifyState(deviceName, StateError, 0, err.Error())
+		} else {
+			if m.logger != nil {
+				m.logger.Info("MultiClient: client exited normally, notifying disconnected",
+					logger.String("device", deviceName))
+			}
+			m.notifyState(deviceName, StateDisconnected, 0, "")
 		}
 
 		m.mu.Lock()
@@ -105,15 +121,17 @@ func (m *MultiClient) AddPort(deviceName string, localIP string, localPort int) 
 // RemovePort 移除端口映射
 func (m *MultiClient) RemovePort(deviceName string) error {
 	m.mu.Lock()
-	defer m.mu.Unlock()
-
 	client, exists := m.clients[deviceName]
 	if !exists {
+		m.mu.Unlock()
 		return fmt.Errorf("device not found: %s", deviceName)
 	}
-
-	client.Stop()
+	// 先从映射中删除，避免 client goroutine 尝试获取锁
 	delete(m.clients, deviceName)
+	m.mu.Unlock()
+
+	// 在锁外停止客户端，避免死锁
+	client.Stop()
 	m.notifyState(deviceName, StateDisconnected, 0, "")
 
 	return nil
@@ -150,11 +168,18 @@ func (m *MultiClient) Stop() {
 	close(m.stopCh)
 
 	m.mu.Lock()
+	// 收集所有客户端，在锁外停止以避免死锁
+	clientsToStop := make([]*Client, 0, len(m.clients))
 	for _, client := range m.clients {
-		client.Stop()
+		clientsToStop = append(clientsToStop, client)
 	}
 	m.clients = make(map[string]*Client)
 	m.mu.Unlock()
+
+	// 在锁外停止所有客户端，避免死锁
+	for _, client := range clientsToStop {
+		client.Stop()
+	}
 
 	close(m.doneCh)
 }

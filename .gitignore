@@ -1,5 +1,6 @@
 # Binary
 chimera-remote-port-forward
+build/
 
 # IDE
 .idea/

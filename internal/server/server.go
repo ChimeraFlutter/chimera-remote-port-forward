@@ -29,17 +29,18 @@ type Device struct {
 
 // Server 服务端
 type Server struct {
-	config   *config.ServerConfig
-	portPool *PortPool
-	devices  map[string]*Device           // 设备名 -> 设备
-	conns    map[*websocket.Conn]*Device  // 连接 -> 设备
-	proxies  map[int]*Proxy               // 端口 -> 代理
-	mu       sync.RWMutex
-	upgrader websocket.Upgrader
-	logger   *logger.Logger
-	httpSrv  *http.Server
-	stopCh   chan struct{}
-	doneCh   chan struct{}
+	config     *config.ServerConfig
+	portPool   *PortPool
+	devices    map[string]*Device           // 设备名 -> 设备
+	conns      map[*websocket.Conn]*Device  // 连接 -> 设备
+	proxies    map[int]*Proxy               // 端口 -> 代理
+	mu         sync.RWMutex
+	upgrader   websocket.Upgrader
+	logger     *logger.Logger
+	httpSrv    *http.Server
+	webServer  *WebServer // Web管理界面
+	stopCh     chan struct{}
+	doneCh     chan struct{}
 }
 
 // NewServer 创建服务端
@@ -74,9 +75,9 @@ func (s *Server) Start() error {
 	go s.checkExpiredDevices()
 
 	// 启动Web管理界面
-	webServer := NewWebServer(s, s.logger)
+	s.webServer = NewWebServer(s, s.logger)
 	go func() {
-		if err := webServer.Start(s.config.Web); err != nil {
+		if err := s.webServer.Start(s.config.Web); err != nil {
 			s.logger.Error("Web server failed", logger.Err(err))
 		}
 	}()
@@ -101,12 +102,18 @@ func (s *Server) Start() error {
 func (s *Server) Stop() {
 	close(s.stopCh)
 
-	s.mu.Lock()
-	// 停止所有代理
-	for port, proxy := range s.proxies {
-		proxy.Stop()
-		delete(s.proxies, port)
+	// 先关闭 WebServer
+	if s.webServer != nil {
+		s.webServer.Stop()
 	}
+
+	s.mu.Lock()
+	// 收集要停止的代理，在锁外停止以避免死锁
+	var proxiesToStop []*Proxy
+	for _, proxy := range s.proxies {
+		proxiesToStop = append(proxiesToStop, proxy)
+	}
+	s.proxies = make(map[int]*Proxy)
 	// 收集要关闭的连接，在锁外关闭以避免死锁
 	var connsToClose []*websocket.Conn
 	for _, device := range s.devices {
@@ -115,6 +122,11 @@ func (s *Server) Stop() {
 	s.devices = make(map[string]*Device)
 	s.conns = make(map[*websocket.Conn]*Device)
 	s.mu.Unlock()
+
+	// 在锁外停止代理，避免死锁
+	for _, proxy := range proxiesToStop {
+		proxy.Stop()
+	}
 
 	// 在锁外关闭连接
 	for _, conn := range connsToClose {
@@ -253,6 +265,9 @@ func (s *Server) handleRegister(conn *websocket.Conn, msg *protocol.ClientMessag
 
 	s.mu.Unlock()
 
+	// 广播设备列表更新
+	s.webServer.BroadcastDevices()
+
 	s.logger.Info("Device registered",
 		logger.String("device", msg.DeviceName),
 		logger.Int("local_port", msg.LocalPort),
@@ -358,6 +373,9 @@ func (s *Server) handleDisconnect(conn *websocket.Conn) {
 	if proxy != nil {
 		proxy.Stop()
 	}
+
+	// 广播设备列表更新
+	s.webServer.BroadcastDevices()
 }
 
 // checkHeartbeatTimeout 检查心跳超时
@@ -398,15 +416,13 @@ func (s *Server) sendMessage(conn *websocket.Conn, msg *protocol.ServerMessage) 
 		return
 	}
 
-	// 查找对应的设备获取写锁
+	// 先查找设备并获取锁，避免在持有 s.mu 时获取 device.connMu
 	s.mu.RLock()
 	device, exists := s.conns[conn]
-	if exists {
-		device.connMu.Lock()
-	}
 	s.mu.RUnlock()
 
 	if exists {
+		device.connMu.Lock()
 		err = conn.WriteMessage(websocket.TextMessage, data)
 		device.connMu.Unlock()
 	} else {
@@ -448,20 +464,22 @@ func (s *Server) GetDevice(name string) *Device {
 // EnableDevice 启用设备端口
 func (s *Server) EnableDevice(deviceName string, duration time.Duration) error {
 	s.mu.Lock()
-	defer s.mu.Unlock()
 
 	device, exists := s.devices[deviceName]
 	if !exists {
+		s.mu.Unlock()
 		return fmt.Errorf("device not found: %s", deviceName)
 	}
 
 	if device.Enabled {
+		s.mu.Unlock()
 		return fmt.Errorf("device already enabled: %s", deviceName)
 	}
 
 	// 启动TCP代理
 	proxy := NewProxy(device.RemotePort, device, s.config.MaxConnsPerProxy, s.logger)
 	if err := proxy.Start(); err != nil {
+		s.mu.Unlock()
 		return fmt.Errorf("failed to start proxy: %w", err)
 	}
 	s.proxies[device.RemotePort] = proxy
@@ -479,26 +497,33 @@ func (s *Server) EnableDevice(deviceName string, duration time.Duration) error {
 		logger.Int("remote_port", device.RemotePort),
 		logger.Duration("duration", duration))
 
+	s.mu.Unlock()
+
+	// 广播设备列表更新（在锁外调用，避免死锁）
+	s.webServer.BroadcastDevices()
+
 	return nil
 }
 
 // DisableDevice 禁用设备端口
 func (s *Server) DisableDevice(deviceName string) error {
 	s.mu.Lock()
-	defer s.mu.Unlock()
 
 	device, exists := s.devices[deviceName]
 	if !exists {
+		s.mu.Unlock()
 		return fmt.Errorf("device not found: %s", deviceName)
 	}
 
 	if !device.Enabled {
+		s.mu.Unlock()
 		return fmt.Errorf("device not enabled: %s", deviceName)
 	}
 
-	// 停止代理
+	// 收集要停止的代理，在锁外停止以避免死锁
+	var proxyToStop *Proxy
 	if proxy, ok := s.proxies[device.RemotePort]; ok {
-		proxy.Stop()
+		proxyToStop = proxy
 		delete(s.proxies, device.RemotePort)
 	}
 
@@ -509,6 +534,16 @@ func (s *Server) DisableDevice(deviceName string) error {
 	s.logger.Info("Device disabled",
 		logger.String("device", deviceName),
 		logger.Int("remote_port", device.RemotePort))
+
+	s.mu.Unlock()
+
+	// 在锁外停止代理，避免死锁
+	if proxyToStop != nil {
+		proxyToStop.Stop()
+	}
+
+	// 广播设备列表更新
+	s.webServer.BroadcastDevices()
 
 	return nil
 }
@@ -521,6 +556,7 @@ func (s *Server) checkExpiredDevices() {
 	for {
 		select {
 		case <-ticker.C:
+			var proxiesToStop []*Proxy
 			s.mu.Lock()
 			now := time.Now()
 			for _, device := range s.devices {
@@ -529,9 +565,9 @@ func (s *Server) checkExpiredDevices() {
 						logger.String("device", device.Name),
 						logger.Int("remote_port", device.RemotePort))
 
-					// 停止代理
+					// 收集要停止的代理，在锁外停止以避免死锁
 					if proxy, ok := s.proxies[device.RemotePort]; ok {
-						proxy.Stop()
+						proxiesToStop = append(proxiesToStop, proxy)
 						delete(s.proxies, device.RemotePort)
 					}
 
@@ -540,6 +576,14 @@ func (s *Server) checkExpiredDevices() {
 				}
 			}
 			s.mu.Unlock()
+
+			// 在锁外停止代理，避免死锁
+			for _, proxy := range proxiesToStop {
+				proxy.Stop()
+			}
+
+			// 广播设备列表更新
+			s.webServer.BroadcastDevices()
 		case <-s.stopCh:
 			return
 		}

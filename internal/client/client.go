@@ -43,14 +43,21 @@ func NewClient(cfg *config.ClientConfig, logger *logger.Logger) *Client {
 // Start 启动客户端
 func (c *Client) Start() error {
 	defer close(c.doneCh)
+	reconnectCount := 0
 	for {
 		select {
 		case <-c.stopCh:
+			c.logger.Info("Start: received stop signal, exiting")
 			return nil
 		default:
+			reconnectCount++
+			c.logger.Info("Attempting connection",
+				logger.Int("attempt", reconnectCount))
+
 			if err := c.connect(); err != nil {
 				c.logger.Warn("Connect failed, retrying",
 					logger.Err(err),
+					logger.Int("attempt", reconnectCount),
 					logger.Duration("retry_interval", c.Config.ReconnectInterval))
 				time.Sleep(c.Config.ReconnectInterval)
 				continue
@@ -60,6 +67,7 @@ func (c *Client) Start() error {
 			if err := c.register(); err != nil {
 				c.logger.Warn("Register failed, retrying",
 					logger.Err(err),
+					logger.Int("attempt", reconnectCount),
 					logger.Duration("retry_interval", c.Config.ReconnectInterval))
 				c.closeConn()
 				time.Sleep(c.Config.ReconnectInterval)
@@ -156,8 +164,10 @@ func (c *Client) run() {
 
 	// 消息处理循环
 	defer func() {
+		c.logger.Info("run: exiting main loop, starting cleanup")
 		close(heartbeatDone)
 		c.cleanup()
+		c.logger.Info("run: cleanup completed, will attempt reconnect")
 	}()
 
 	for {
@@ -191,12 +201,15 @@ func (c *Client) heartbeatLoop(done <-chan struct{}) {
 		select {
 		case <-ticker.C:
 			if err := c.sendHeartbeat(); err != nil {
-				c.logger.Warn("Send heartbeat failed", logger.Err(err))
+				c.logger.Warn("Send heartbeat failed, closing connection to trigger reconnect", logger.Err(err))
+				c.closeConn() // 主动关闭连接，触发重连
 				return
 			}
 		case <-done:
+			c.logger.Info("heartbeatLoop: received done signal, exiting")
 			return
 		case <-c.stopCh:
+			c.logger.Info("heartbeatLoop: received stop signal, exiting")
 			return
 		}
 	}
@@ -351,14 +364,23 @@ func (c *Client) cleanup() {
 	}
 	c.localConns = make(map[string]net.Conn)
 
-	c.closeConn()
+	// 使用 closeConnUnsafe，因为我们已经持有锁
+	c.closeConnUnsafe()
 }
 
-// closeConn 关闭WebSocket连接
+// closeConn 关闭WebSocket连接（必须在持有 c.mu 锁的情况下调用，或者不在 cleanup 中调用）
 func (c *Client) closeConn() {
 	c.mu.Lock()
 	defer c.mu.Unlock()
 
+	if c.conn != nil {
+		c.conn.Close()
+		c.conn = nil
+	}
+}
+
+// closeConnUnsafe 关闭WebSocket连接（调用者必须持有 c.mu 锁）
+func (c *Client) closeConnUnsafe() {
 	if c.conn != nil {
 		c.conn.Close()
 		c.conn = nil
