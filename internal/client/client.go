@@ -23,6 +23,7 @@ type Client struct {
 	connMu     sync.Mutex // 保护WebSocket写入
 	stopCh     chan struct{}
 	doneCh     chan struct{}
+	started    bool        // 标记 Start() 是否已开始
 	logger     *logger.Logger
 }
 
@@ -42,6 +43,14 @@ func NewClient(cfg *config.ClientConfig, logger *logger.Logger) *Client {
 
 // Start 启动客户端
 func (c *Client) Start() error {
+	c.mu.Lock()
+	if c.started {
+		c.mu.Unlock()
+		return fmt.Errorf("client already started")
+	}
+	c.started = true
+	c.mu.Unlock()
+
 	defer close(c.doneCh)
 	reconnectCount := 0
 	for {
@@ -95,14 +104,17 @@ func (c *Client) Stop() {
 	c.mu.Lock()
 	conn := c.conn
 	c.conn = nil
+	started := c.started
 	c.mu.Unlock()
 
 	if conn != nil {
 		conn.Close()
 	}
 
-	// 等待 Start() 返回
-	<-c.doneCh
+	// 只有 Start() 已被调用时才等待 doneCh
+	if started {
+		<-c.doneCh
+	}
 	c.logger.Info("Client stopped")
 }
 
